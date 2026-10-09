@@ -12,10 +12,15 @@ the result on a private results page.
 
 - **Next.js App Router, React, TypeScript, Tailwind CSS** — same stack as
   before.
-- **Persistence:** [`node:sqlite`](https://nodejs.org/api/sqlite.html)
-  (`DatabaseSync`), Node's built-in synchronous SQLite driver (stable enough
-  for this use case, ships with Node 22+, **no extra dependency**). The
-  database file lives at `data/app.db` (created automatically, gitignored).
+- **Persistence:** Postgres, via [`pg`](https://node-postgres.com/) (node-postgres),
+  connecting to **Vercel Postgres (Neon)**. This replaced an earlier
+  `node:sqlite`-based version: embedded SQLite looked like a good
+  zero-dependency fit locally, but Vercel's serverless functions have a
+  **read-only filesystem** outside of `/tmp` (and `/tmp` isn't shared across
+  instances or persisted between invocations anyway), so it failed with
+  `ENOENT ... mkdir '/var/task/data'` in production. A real network-reachable
+  database is required for data that must survive across requests, instances,
+  and devices — which is the whole point of this feature.
 - **Mutations** go through Next.js **Server Actions** (`app/actions.ts`):
   `createQuestionAction` and `submitAnswerAction`. Both validate and trim
   input on the server — the client never writes to the database directly.
@@ -26,25 +31,25 @@ the result on a private results page.
   receiver on a completely different device/browser than the sender.
 - **One-time answer enforcement is at the database layer**, not the UI: the
   `answers` table has a `UNIQUE` constraint on `question_id`, and the insert
-  in `lib/db.ts` catches the constraint violation and reports
-  `already_answered`. Because `node:sqlite` is synchronous and Node is
-  single-threaded, two submissions that race in the same server process are
-  naturally serialized — only one `INSERT` can win. (This guarantee is
-  per-process; it assumes you run a single Node server instance, which fits
-  this project's scope. A multi-instance deployment would need a real
-  client-server database such as Postgres instead of embedded SQLite.)
+  in `lib/db.ts` catches the Postgres unique-violation error (`code 23505`)
+  and reports `already_answered`. Postgres enforces this constraint
+  atomically regardless of how many app instances are running concurrently,
+  so two submissions racing at the same time are guaranteed to leave exactly
+  one `ok` and one `already_answered` — verified directly against Postgres's
+  constraint semantics (via an in-memory Postgres-compatible engine) before
+  shipping this change.
 - **Sender/receiver privacy:** a question has two separate tokens — the
   public `questionId` (used in `/answer/[questionId]`, answering only) and a
   private `resultsToken` (used in `/results/[resultsToken]`, viewing only).
   The results token is only ever returned once, directly to the sender who
   just created the question — it's never embedded in or reachable from the
   public answer page or its API response.
-- **New dependency:** none at runtime. `@types/node` was bumped to `^22` (dev
-  only) to match the installed Node version and pick up `node:sqlite` types.
+- **New dependency:** `pg` (runtime) and `@types/pg` (dev). `@types/node` was
+  also bumped to `^22` to match the installed Node version.
 
 ### New/changed files
 
-- `lib/db.ts` — SQLite schema + queries (the only module that touches the DB).
+- `lib/db.ts` — Postgres schema + queries (the only module that touches the DB).
 - `app/actions.ts` — Server Actions: create a question, submit an answer.
 - `app/api/questions/[questionId]/route.ts` — public GET: question text/options + answered flag (no results token).
 - `app/api/results/[resultsToken]/route.ts` — private GET: question + answer status + selected option + timestamp.
@@ -67,7 +72,7 @@ CREATE TABLE questions (
 );
 
 CREATE TABLE answers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   question_id TEXT NOT NULL UNIQUE REFERENCES questions(id), -- UNIQUE = one answer per question
   selected_option TEXT NOT NULL,
   submitted_at TEXT NOT NULL
@@ -79,21 +84,45 @@ No separate `status` column: a question's status is derived at read time
 source of truth.
 
 **Migrations:** none needed to run by hand. `lib/db.ts` runs
-`CREATE TABLE IF NOT EXISTS` on first use, so the schema is created
-automatically the first time the app touches the database (e.g. on first
-`npm run dev` or `npm run build`).
+`CREATE TABLE IF NOT EXISTS` once per cold start (cached on the connection
+pool), so the schema is created automatically the first time the app touches
+the database — no separate migration step or CLI command required.
 
 ## Environment variables
 
-None required. There are no secrets, external APIs, or third-party services
-— the SQLite file path is a local relative path (`data/app.db`).
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `POSTGRES_URL` | Yes (or `DATABASE_URL`) | A Postgres connection string, e.g. `postgres://user:password@host/dbname?sslmode=require`. |
+
+No other secrets are needed — there's no auth, no third-party APIs.
+
+### Setting it up on Vercel
+
+1. In your Vercel project, go to **Storage → Create Database → Postgres**
+   (this provisions a Neon-backed Postgres database and is included in
+   Vercel's free Hobby tier).
+2. Connect it to this project. Vercel automatically injects `POSTGRES_URL`
+   (and a few related variables) into the project's environment for
+   Production, Preview, and Development — no manual copy-pasting needed.
+3. Redeploy. `lib/db.ts` creates the `questions`/`answers` tables
+   automatically on first request.
 
 ## Local setup and run
 
+Pull the same database credentials Vercel just created, via the
+[Vercel CLI](https://vercel.com/docs/cli):
+
 ```bash
 npm install
+npx vercel link       # link this folder to your Vercel project, once
+npx vercel env pull .env.local
 npm run dev
 ```
+
+(If you'd rather not share the production database with local development,
+create a second Postgres database — e.g. a free one at
+[neon.tech](https://neon.tech) — and put its connection string in
+`.env.local` as `POSTGRES_URL=...` instead.)
 
 Open [http://localhost:3000](http://localhost:3000). To try the receiver
 flow, paste the generated `/answer/...` link into another browser/profile (or
@@ -104,9 +133,6 @@ npm run build   # production build
 npm run start   # run the production build
 npm run lint    # ESLint
 ```
-
-The SQLite file is created at `data/app.db` on first run; delete it to reset
-all data.
 
 ## Pages
 

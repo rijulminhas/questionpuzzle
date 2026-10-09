@@ -31,7 +31,7 @@ export async function createQuestionAction(
     return { error: "The two answers must be different." };
   }
 
-  const record = createQuestionRecord({ questionText, optionOne, optionTwo });
+  const record = await createQuestionRecord({ questionText, optionOne, optionTwo });
 
   return { questionId: record.id, resultsToken: record.resultsToken };
 }
@@ -40,7 +40,7 @@ export async function submitAnswerAction(
   questionId: string,
   selectedOption: string,
 ): Promise<SubmitAnswerState> {
-  const question = getQuestionById(questionId);
+  const question = await getQuestionById(questionId);
   if (!question) {
     return { status: "not_found" };
   }
@@ -49,7 +49,7 @@ export async function submitAnswerAction(
     return { status: "error", error: "That is not a valid answer for this question." };
   }
 
-  const result = submitAnswerRecord(questionId, selectedOption);
+  const result = await submitAnswerRecord(questionId, selectedOption);
   if (result === "ok") return { status: "success" };
   if (result === "already_answered") return { status: "already_answered" };
   return { status: "not_found" };

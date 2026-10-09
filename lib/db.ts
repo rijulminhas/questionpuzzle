@@ -1,7 +1,5 @@
-import { DatabaseSync } from "node:sqlite";
+import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
 
 export interface QuestionRecord {
   id: string;
@@ -20,40 +18,56 @@ export interface AnswerRecord {
 
 export type SubmitAnswerResult = "ok" | "already_answered" | "not_found";
 
-const globalForDb = globalThis as unknown as { __questionDb?: DatabaseSync };
+const globalForDb = globalThis as unknown as {
+  __questionPool?: Pool;
+  __questionSchemaReady?: Promise<void>;
+};
 
-function openDatabase(): DatabaseSync {
-  const dataDir = path.join(process.cwd(), "data");
-  mkdirSync(dataDir, { recursive: true });
-  const db = new DatabaseSync(path.join(dataDir, "app.db"));
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA foreign_keys = ON;");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS questions (
-      id TEXT PRIMARY KEY,
-      results_token TEXT NOT NULL UNIQUE,
-      question_text TEXT NOT NULL,
-      option_one TEXT NOT NULL,
-      option_two TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    );
-  `);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS answers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
-      selected_option TEXT NOT NULL,
-      submitted_at TEXT NOT NULL
-    );
-  `);
-  return db;
+function getPool(): Pool {
+  if (!globalForDb.__questionPool) {
+    const connectionString = process.env.POSTGRES_URL ?? process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error(
+        "Missing POSTGRES_URL (or DATABASE_URL) environment variable. " +
+          "Connect a Postgres database to this project (e.g. the Vercel Postgres / Neon " +
+          "integration) and ensure its connection string is available at runtime.",
+      );
+    }
+    const needsSsl =
+      connectionString.includes("sslmode=require") || connectionString.includes("neon.tech");
+    globalForDb.__questionPool = new Pool({
+      connectionString,
+      ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+    });
+  }
+  return globalForDb.__questionPool;
 }
 
-function getDb(): DatabaseSync {
-  if (!globalForDb.__questionDb) {
-    globalForDb.__questionDb = openDatabase();
+function ensureSchema(): Promise<void> {
+  if (!globalForDb.__questionSchemaReady) {
+    globalForDb.__questionSchemaReady = getPool()
+      .query(
+        `
+        CREATE TABLE IF NOT EXISTS questions (
+          id TEXT PRIMARY KEY,
+          results_token TEXT NOT NULL UNIQUE,
+          question_text TEXT NOT NULL,
+          option_one TEXT NOT NULL,
+          option_two TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS answers (
+          id SERIAL PRIMARY KEY,
+          question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
+          selected_option TEXT NOT NULL,
+          submitted_at TEXT NOT NULL
+        );
+      `,
+      )
+      .then(() => undefined);
   }
-  return globalForDb.__questionDb;
+  return globalForDb.__questionSchemaReady;
 }
 
 function rowToQuestion(row: Record<string, unknown>): QuestionRecord {
@@ -81,8 +95,8 @@ export interface CreateQuestionInput {
   optionTwo: string;
 }
 
-export function createQuestionRecord(input: CreateQuestionInput): QuestionRecord {
-  const db = getDb();
+export async function createQuestionRecord(input: CreateQuestionInput): Promise<QuestionRecord> {
+  await ensureSchema();
   const record: QuestionRecord = {
     id: randomUUID(),
     resultsToken: randomUUID(),
@@ -92,60 +106,64 @@ export function createQuestionRecord(input: CreateQuestionInput): QuestionRecord
     createdAt: new Date().toISOString(),
   };
 
-  db.prepare(
+  await getPool().query(
     `INSERT INTO questions (id, results_token, question_text, option_one, option_two, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(
-    record.id,
-    record.resultsToken,
-    record.questionText,
-    record.optionOne,
-    record.optionTwo,
-    record.createdAt,
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      record.id,
+      record.resultsToken,
+      record.questionText,
+      record.optionOne,
+      record.optionTwo,
+      record.createdAt,
+    ],
   );
 
   return record;
 }
 
-export function getQuestionById(id: string): QuestionRecord | undefined {
-  const row = getDb().prepare("SELECT * FROM questions WHERE id = ?").get(id) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? rowToQuestion(row) : undefined;
+export async function getQuestionById(id: string): Promise<QuestionRecord | undefined> {
+  await ensureSchema();
+  const { rows } = await getPool().query("SELECT * FROM questions WHERE id = $1", [id]);
+  return rows[0] ? rowToQuestion(rows[0]) : undefined;
 }
 
-export function getQuestionByResultsToken(resultsToken: string): QuestionRecord | undefined {
-  const row = getDb()
-    .prepare("SELECT * FROM questions WHERE results_token = ?")
-    .get(resultsToken) as Record<string, unknown> | undefined;
-  return row ? rowToQuestion(row) : undefined;
+export async function getQuestionByResultsToken(
+  resultsToken: string,
+): Promise<QuestionRecord | undefined> {
+  await ensureSchema();
+  const { rows } = await getPool().query("SELECT * FROM questions WHERE results_token = $1", [
+    resultsToken,
+  ]);
+  return rows[0] ? rowToQuestion(rows[0]) : undefined;
 }
 
-export function getAnswerForQuestion(questionId: string): AnswerRecord | undefined {
-  const row = getDb()
-    .prepare("SELECT * FROM answers WHERE question_id = ?")
-    .get(questionId) as Record<string, unknown> | undefined;
-  return row ? rowToAnswer(row) : undefined;
+export async function getAnswerForQuestion(
+  questionId: string,
+): Promise<AnswerRecord | undefined> {
+  await ensureSchema();
+  const { rows } = await getPool().query("SELECT * FROM answers WHERE question_id = $1", [
+    questionId,
+  ]);
+  return rows[0] ? rowToAnswer(rows[0]) : undefined;
 }
 
-export function submitAnswerRecord(
+export async function submitAnswerRecord(
   questionId: string,
   selectedOption: string,
-): SubmitAnswerResult {
-  const db = getDb();
-  const question = getQuestionById(questionId);
+): Promise<SubmitAnswerResult> {
+  await ensureSchema();
+  const question = await getQuestionById(questionId);
   if (!question) return "not_found";
 
   try {
-    db.prepare(
-      `INSERT INTO answers (question_id, selected_option, submitted_at) VALUES (?, ?, ?)`,
-    ).run(questionId, selectedOption, new Date().toISOString());
+    await getPool().query(
+      `INSERT INTO answers (question_id, selected_option, submitted_at) VALUES ($1, $2, $3)`,
+      [questionId, selectedOption, new Date().toISOString()],
+    );
     return "ok";
   } catch (err) {
-    const isUniqueViolation =
-      err instanceof Error &&
-      (err as NodeJS.ErrnoException).code === "ERR_SQLITE_ERROR" &&
-      /UNIQUE constraint failed/.test(err.message);
+    const isUniqueViolation = (err as { code?: string }).code === "23505";
     if (isUniqueViolation) return "already_answered";
     throw err;
   }
