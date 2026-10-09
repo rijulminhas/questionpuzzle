@@ -1,85 +1,61 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import type { Question } from "@/types/question";
+import { useActionState } from "react";
+import { createQuestionAction } from "@/app/actions";
+import type { CreateQuestionState } from "@/types/question";
 
 interface QuestionFormProps {
-  onSubmit: (data: Question) => void;
+  onCreated: (questionId: string, resultsToken: string) => void;
 }
 
-type Errors = Partial<Record<keyof Question, string>>;
+const initialState: CreateQuestionState = {};
 
-export default function QuestionForm({ onSubmit }: QuestionFormProps) {
-  const [question, setQuestionText] = useState("");
-  const [firstAnswer, setFirstAnswer] = useState("");
-  const [secondAnswer, setSecondAnswer] = useState("");
-  const [errors, setErrors] = useState<Errors>({});
-
-  const validate = (): Errors => {
-    const nextErrors: Errors = {};
-    if (!question.trim()) nextErrors.question = "Please enter a question.";
-    if (!firstAnswer.trim()) nextErrors.firstAnswer = "Please enter the first answer.";
-    if (!secondAnswer.trim()) nextErrors.secondAnswer = "Please enter the second answer.";
-    return nextErrors;
-  };
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const nextErrors = validate();
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
-
-    onSubmit({
-      question: question.trim(),
-      firstAnswer: firstAnswer.trim(),
-      secondAnswer: secondAnswer.trim(),
-    });
-  };
+export default function QuestionForm({ onCreated }: QuestionFormProps) {
+  const [state, formAction, pending] = useActionState(async (
+    prevState: CreateQuestionState,
+    formData: FormData,
+  ) => {
+    const result = await createQuestionAction(prevState, formData);
+    if (result.questionId && result.resultsToken) {
+      onCreated(result.questionId, result.resultsToken);
+    }
+    return result;
+  }, initialState);
 
   return (
     <form
-      onSubmit={handleSubmit}
-      noValidate
+      action={formAction}
       className="space-y-6 rounded-3xl border border-white/60 bg-white/90 p-8 shadow-xl shadow-purple-200/50 backdrop-blur"
     >
       <div className="space-y-1 text-center">
         <h1 className="text-2xl font-bold text-slate-800">Create Your Question 💭</h1>
         <p className="text-sm text-slate-500">
-          Ask something playful — your friend will see it on the next screen.
+          Ask something playful — you&apos;ll get a link to send to a friend.
         </p>
       </div>
 
       <Field
         id="question"
+        name="question"
         label="Question"
-        value={question}
-        onChange={setQuestionText}
         placeholder="Do you like me?"
-        error={errors.question}
         multiline
       />
-      <Field
-        id="firstAnswer"
-        label="First answer choice"
-        value={firstAnswer}
-        onChange={setFirstAnswer}
-        placeholder="Yes"
-        error={errors.firstAnswer}
-      />
-      <Field
-        id="secondAnswer"
-        label="Second answer choice"
-        value={secondAnswer}
-        onChange={setSecondAnswer}
-        placeholder="No"
-        error={errors.secondAnswer}
-      />
+      <Field id="firstAnswer" name="firstAnswer" label="First answer choice" placeholder="Yes" />
+      <Field id="secondAnswer" name="secondAnswer" label="Second answer choice" placeholder="No" />
+
+      {state.error && (
+        <p role="alert" className="text-sm font-medium text-red-500">
+          {state.error}
+        </p>
+      )}
 
       <button
         type="submit"
-        className="w-full rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 px-6 py-3 text-base font-semibold text-white shadow-lg shadow-purple-300/50 transition-transform hover:scale-[1.02] hover:shadow-xl focus:outline-none focus-visible:ring-4 focus-visible:ring-purple-300 active:scale-[0.99]"
+        disabled={pending}
+        className="w-full rounded-2xl bg-gradient-to-r from-pink-500 to-purple-600 px-6 py-3 text-base font-semibold text-white shadow-lg shadow-purple-300/50 transition-transform hover:scale-[1.02] hover:shadow-xl focus:outline-none focus-visible:ring-4 focus-visible:ring-purple-300 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
       >
-        Create Question
+        {pending ? "Creating…" : "Create Question"}
       </button>
     </form>
   );
@@ -87,21 +63,15 @@ export default function QuestionForm({ onSubmit }: QuestionFormProps) {
 
 interface FieldProps {
   id: string;
+  name: string;
   label: string;
-  value: string;
-  onChange: (value: string) => void;
   placeholder: string;
-  error?: string;
   multiline?: boolean;
 }
 
-function Field({ id, label, value, onChange, placeholder, error, multiline }: FieldProps) {
-  const describedBy = error ? `${id}-error` : undefined;
+function Field({ id, name, label, placeholder, multiline }: FieldProps) {
   const sharedClassName =
-    "w-full rounded-xl border px-4 py-2.5 text-slate-800 placeholder:text-slate-400 transition focus:outline-none focus-visible:ring-4 " +
-    (error
-      ? "border-red-300 focus-visible:ring-red-200"
-      : "border-slate-200 focus-visible:ring-purple-200");
+    "w-full rounded-xl border border-slate-200 px-4 py-2.5 text-slate-800 placeholder:text-slate-400 transition focus:outline-none focus-visible:ring-4 focus-visible:ring-purple-200";
 
   return (
     <div className="space-y-1.5">
@@ -111,32 +81,23 @@ function Field({ id, label, value, onChange, placeholder, error, multiline }: Fi
       {multiline ? (
         <textarea
           id={id}
-          name={id}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
+          name={name}
           placeholder={placeholder}
           rows={2}
-          aria-invalid={Boolean(error)}
-          aria-describedby={describedBy}
+          required
+          maxLength={300}
           className={`${sharedClassName} resize-none`}
         />
       ) : (
         <input
           id={id}
-          name={id}
+          name={name}
           type="text"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
-          aria-invalid={Boolean(error)}
-          aria-describedby={describedBy}
+          required
+          maxLength={100}
           className={sharedClassName}
         />
-      )}
-      {error && (
-        <p id={`${id}-error`} role="alert" className="text-sm text-red-500">
-          {error}
-        </p>
       )}
     </div>
   );

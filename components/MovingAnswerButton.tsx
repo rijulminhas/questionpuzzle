@@ -6,6 +6,7 @@ interface MovingAnswerButtonProps {
   label: string;
   zoneRef: RefObject<HTMLDivElement | null>;
   obstacleRef: RefObject<HTMLButtonElement | null>;
+  disabled?: boolean;
 }
 
 const EVADE_RADIUS = 110;
@@ -13,7 +14,12 @@ const MOVE_COOLDOWN_MS = 350;
 const EDGE_MARGIN = 12;
 const OBSTACLE_MARGIN = 24;
 
-export default function MovingAnswerButton({ label, zoneRef, obstacleRef }: MovingAnswerButtonProps) {
+export default function MovingAnswerButton({
+  label,
+  zoneRef,
+  obstacleRef,
+  disabled = false,
+}: MovingAnswerButtonProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const lastMoveRef = useRef(0);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
@@ -62,19 +68,21 @@ export default function MovingAnswerButton({ label, zoneRef, obstacleRef }: Movi
   }, [zoneRef, obstacleRef]);
 
   const evade = useCallback(() => {
+    if (disabled) return;
     const now = Date.now();
     if (now - lastMoveRef.current < MOVE_COOLDOWN_MS) return;
     lastMoveRef.current = now;
 
     const next = pickPosition();
     if (next) setPosition(next);
-  }, [pickPosition]);
+  }, [disabled, pickPosition]);
 
   useEffect(() => {
     const zone = zoneRef.current;
     if (!zone) return undefined;
 
     const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType === "touch") return;
       const button = buttonRef.current;
       if (!button) return;
       const rect = button.getBoundingClientRect();
@@ -94,6 +102,22 @@ export default function MovingAnswerButton({ label, zoneRef, obstacleRef }: Movi
     return () => window.removeEventListener("resize", handleResize);
   }, [evade]);
 
+  useEffect(() => {
+    const button = buttonRef.current;
+    if (!button) return undefined;
+
+    // React binds JSX onTouchStart as a passive listener, which silently
+    // ignores preventDefault(). Attaching natively with passive: false lets
+    // us actually block the tap from registering as a selection.
+    const handleTouchStart = (event: TouchEvent) => {
+      event.preventDefault();
+      evade();
+    };
+
+    button.addEventListener("touchstart", handleTouchStart, { passive: false });
+    return () => button.removeEventListener("touchstart", handleTouchStart);
+  }, [evade]);
+
   const handleEvadeEvent = (event: { preventDefault: () => void }) => {
     event.preventDefault();
     evade();
@@ -105,7 +129,6 @@ export default function MovingAnswerButton({ label, zoneRef, obstacleRef }: Movi
       type="button"
       onClick={handleEvadeEvent}
       onPointerDown={handleEvadeEvent}
-      onTouchStart={handleEvadeEvent}
       onFocus={() => evade()}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -113,8 +136,9 @@ export default function MovingAnswerButton({ label, zoneRef, obstacleRef }: Movi
           evade();
         }
       }}
+      disabled={disabled}
       aria-label={`${label} — this button likes to play hard to get`}
-      className="absolute rounded-2xl bg-gradient-to-r from-rose-400 to-pink-500 px-6 py-3 font-semibold text-white shadow-lg shadow-pink-200/60 transition-[left,top] duration-300 ease-out focus:outline-none focus-visible:ring-4 focus-visible:ring-pink-200"
+      className="absolute rounded-2xl bg-gradient-to-r from-rose-400 to-pink-500 px-6 py-3 font-semibold text-white shadow-lg shadow-pink-200/60 transition-[left,top] duration-300 ease-out focus:outline-none focus-visible:ring-4 focus-visible:ring-pink-200 disabled:cursor-not-allowed disabled:opacity-50"
       style={
         position
           ? { left: position.x, top: position.y }
